@@ -24,7 +24,18 @@
 // Provides ISR
 #include <avr/interrupt.h>
 
-volatile irparams_t irparams;
+//TODO volatile irparams_t irparams;
+volatile static irparams_t irparams_list[5]={{0,}};
+volatile static char param_index=-1;
+
+IRSendRev::IRSendRev() {
+    if(param_index < 5){
+        param_index+=1;
+        irparams = &irparams_list[param_index];
+    } else {
+        irparams = NULL;
+    }
+}
 
 void IRSendRev::sendRaw(unsigned int buf[], int len, int hz) {
     enableIROut(hz);
@@ -37,6 +48,7 @@ void IRSendRev::sendRaw(unsigned int buf[], int len, int hz) {
         }
     }
     space(0); // Just to be sure
+    TIMER_ENABLE_INTR;
 }
 
 void IRSendRev::mark(int time) {
@@ -78,7 +90,7 @@ void IRSendRev::enableIROut(int khz) {
 }
 
 void IRSendRev::Init(int revPin) {
-    irparams.recvpin    = revPin;
+    irparams->recvpin    = revPin;
 
     enableIRIn(); // Start the receiver
     delay(20);
@@ -106,11 +118,64 @@ void IRSendRev::enableIRIn() {
     sei();  // enable interrupts
 
     // initialize state machine variables
-    irparams.rcvstate = STATE_IDLE;
-    irparams.rawlen = 0;
+    irparams->rcvstate = STATE_IDLE;
+    irparams->rawlen = 0;
 
     // set pin modes
-    pinMode(irparams.recvpin, INPUT);
+    pinMode(irparams->recvpin, INPUT);
+}
+
+void check_one_irparams_data(volatile irparams_t *irparams) {
+    uint8_t irdata = (uint8_t)digitalRead(irparams->recvpin);
+
+    irparams->timer++; // One more 50us tick
+    if (irparams->rawlen >= RAWBUF) {
+        // Buffer overflow
+        irparams->rcvstate = STATE_STOP;
+    }
+    switch (irparams->rcvstate) {
+    case STATE_IDLE: // In the middle of a gap
+        if (irdata == MARK) {
+            if (irparams->timer < GAP_TICKS) {
+                // Not big enough to be a gap.
+                irparams->timer = 0;
+            } else {
+                // gap just ended, record duration and start recording transmission
+                irparams->rawlen = 0;
+                irparams->rawbuf[irparams->rawlen++] = irparams->timer;
+                irparams->timer = 0;
+                irparams->rcvstate = STATE_MARK;
+            }
+        }
+        break;
+    case STATE_MARK: // timing MARK
+        if (irdata == SPACE) {   // MARK ended, record time
+            irparams->rawbuf[irparams->rawlen++] = irparams->timer;
+            irparams->timer = 0;
+            irparams->rcvstate = STATE_SPACE;
+        }
+        break;
+    case STATE_SPACE: // timing SPACE
+        if (irdata == MARK) { // SPACE just ended, record it
+            irparams->rawbuf[irparams->rawlen++] = irparams->timer;
+            irparams->timer = 0;
+            irparams->rcvstate = STATE_MARK;
+        } else { // SPACE
+            if (irparams->timer > GAP_TICKS) {
+                // big SPACE, indicates gap between codes
+                // Mark current code as ready for processing
+                // Switch to STOP
+                // Don't reset timer; keep counting space width
+                irparams->rcvstate = STATE_STOP;
+            }
+        }
+        break;
+    case STATE_STOP: // waiting, measuring gap
+        if (irdata == MARK) { // reset gap timer
+            irparams->timer = 0;
+        }
+        break;
+    }
 }
 
 // TIMER2 interrupt code to collect raw data.
@@ -123,72 +188,23 @@ void IRSendRev::enableIRIn() {
 
 ISR(TIMER_INTR_NAME) {
     TIMER_RESET;
-
-    uint8_t irdata = (uint8_t)digitalRead(irparams.recvpin);
-
-    irparams.timer++; // One more 50us tick
-    if (irparams.rawlen >= RAWBUF) {
-        // Buffer overflow
-        irparams.rcvstate = STATE_STOP;
+    for(int i=0; i < param_index; i++){
+        check_one_irparams_data(&irparams_list[i]);
     }
-    switch (irparams.rcvstate) {
-        case STATE_IDLE: // In the middle of a gap
-            if (irdata == MARK) {
-                if (irparams.timer < GAP_TICKS) {
-                    // Not big enough to be a gap.
-                    irparams.timer = 0;
-                } else {
-                    // gap just ended, record duration and start recording transmission
-                    irparams.rawlen = 0;
-                    irparams.rawbuf[irparams.rawlen++] = irparams.timer;
-                    irparams.timer = 0;
-                    irparams.rcvstate = STATE_MARK;
-                }
-            }
-            break;
-        case STATE_MARK: // timing MARK
-            if (irdata == SPACE) {   // MARK ended, record time
-                irparams.rawbuf[irparams.rawlen++] = irparams.timer;
-                irparams.timer = 0;
-                irparams.rcvstate = STATE_SPACE;
-            }
-            break;
-        case STATE_SPACE: // timing SPACE
-            if (irdata == MARK) { // SPACE just ended, record it
-                irparams.rawbuf[irparams.rawlen++] = irparams.timer;
-                irparams.timer = 0;
-                irparams.rcvstate = STATE_MARK;
-            } else { // SPACE
-                if (irparams.timer > GAP_TICKS) {
-                    // big SPACE, indicates gap between codes
-                    // Mark current code as ready for processing
-                    // Switch to STOP
-                    // Don't reset timer; keep counting space width
-                    irparams.rcvstate = STATE_STOP;
-                }
-            }
-            break;
-        case STATE_STOP: // waiting, measuring gap
-            if (irdata == MARK) { // reset gap timer
-                irparams.timer = 0;
-            }
-            break;
-    }
-
 }
 
 void IRSendRev::Clear() {
-    irparams.rcvstate = STATE_IDLE;
-    irparams.rawlen = 0;
+    irparams->rcvstate = STATE_IDLE;
+    irparams->rawlen = 0;
 }
 
 // Decodes the received IR message
 // Returns 0 if no data ready, 1 if data ready.
 // Results of decoding are stored in results
 int IRSendRev::decode(decode_results* results) {
-    results->rawbuf = irparams.rawbuf;
-    results->rawlen = irparams.rawlen;
-    if (irparams.rcvstate != STATE_STOP) {
+    results->rawbuf = irparams->rawbuf;
+    results->rawlen = irparams->rawlen;
+    if (irparams->rcvstate != STATE_STOP) {
         return ERR;
     }
     // Throw away and start over
@@ -343,4 +359,4 @@ void IRSendRev::Send(unsigned char* idata, unsigned char ifreq) {
 
 }
 
-IRSendRev IR;
+//IRSendRev IR;

@@ -26,7 +26,7 @@
 
 
 #define USECPERTICK 50  // microseconds per clock interrupt tick
-#define RAWBUF 300 // Length of raw duration buffer
+#define RAWBUF 128 // Length of raw duration buffer
 
 // Marks tend to be 100us too long, and spaces 100us too short
 // when received due to sensor lag.
@@ -42,10 +42,13 @@ class decode_results {
     int rawlen;           // Number of records in rawbuf.
 };
 
+struct irparams;
+typedef struct irparams irparams_t;
 // main class for receiving IR
 class IRSendRev {
   private:
     decode_results results;
+    volatile irparams_t *irparams;
     //**************************rev**********************************
 
   private:
@@ -72,11 +75,10 @@ class IRSendRev {
     void enableIROut(int khz);
 
   public:
-
+    IRSendRev();
     void Send(unsigned char* idata, unsigned char ifreq);
-
 };
 
-extern IRSendRev IR;
+//extern IRSendRev IR;
 
 #endif
